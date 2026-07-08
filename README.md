@@ -1,14 +1,14 @@
 # 🌿 AmazonNet — Multi-Label Satellite Image Classification for Deforestation Detection
 
-Can a deep learning model learn to detect illegal logging, slash-and-burn agriculture, and artisanal mining **directly from satellite imagery** — before any human analyst flags them?
+Can a deep learning model learn to detect illegal logging, slash-and-burn agriculture, and artisanal mining directly from satellite imagery — before any human analyst flags them?
 
-This project builds a full computer vision pipeline — from exploratory data analysis to Grad-CAM visual explanations — to classify land use and atmospheric conditions in chips of Amazon rainforest imagery. It is a real-world multi-label classification problem where **a single image can carry up to 9 simultaneous labels**, and where missing a threat (false negative) is far more costly than a false alarm.
+This project builds a full computer vision pipeline — from exploratory data analysis to Grad-CAM visual explanations — to classify land use and atmospheric conditions in chips of Amazon rainforest imagery. It is a real-world multi-label classification problem where a single image can carry up to 9 simultaneous labels, and where missing a threat (false negative) is far more costly than a false alarm.
 
 ---
 
 ## 🎯 Motivation
 
-Deforestation of the Amazon is one of the most critical environmental challenges of our time. Satellite imagery provides continuous, large-scale coverage — but the volume of data far exceeds human review capacity. This project asks: **how much can a CNN learn about land use threats from 256×256 pixel chips**, using only visual signal?
+Deforestation of the Amazon is one of the most critical environmental challenges of our time. Satellite imagery provides continuous, large-scale coverage — but the volume of data far exceeds human review capacity. This project asks: how much can a CNN learn about land use threats from 256×256 pixel chips, using only visual signal?
 
 The answer has direct real-world implications: automated flagging of suspicious zones for ranger follow-up, trend monitoring at scale, and early-warning systems for conservation agencies.
 
@@ -18,12 +18,14 @@ The answer has direct real-world implications: automated flagging of suspicious 
 
 ## 📊 Dataset
 
-- **Source:** [Planet: Understanding the Amazon from Space](https://www.kaggle.com/c/planet-understanding-the-amazon-from-space) (Kaggle Competition)
-- **Mirror used:** [nikitarom/planets-dataset](https://www.kaggle.com/datasets/nikitarom/planets-dataset)
-- **Size:** 40,479 labeled training images + 61,191 test images
-- **Resolution:** 256 × 256 pixels, RGB (converted from CMYK at load time)
-- **Labels:** 17 classes, multi-label (a single image can have multiple simultaneous labels)
-- **Class imbalance:** extreme — ratio of most to least frequent label is **383×**
+| | |
+|---|---|
+| **Source** | Planet: Understanding the Amazon from Space (Kaggle Competition) |
+| **Mirror used** | nikitarom/planets-dataset |
+| **Size** | 40,479 labeled training images + 61,191 test images |
+| **Resolution** | 256 × 256 pixels, RGB (converted from CMYK at load time) |
+| **Labels** | 17 classes, multi-label (a single image can have multiple simultaneous labels) |
+| **Class imbalance** | Extreme — ratio of most to least frequent label is 383× |
 
 ### Label taxonomy
 
@@ -40,11 +42,11 @@ The answer has direct real-world implications: automated flagging of suspicious 
 |---|---|
 | All images are CMYK format | `.convert("RGB")` on every load |
 | Label imbalance up to 383× | `pos_weight` in `BCEWithLogitsLoss` |
-| Mean 2.87 labels per image | Decision threshold search between 0.2–0.4 |
+| Mean 2.87 labels per image | Decision threshold set at 0.3 |
 | `primary` present in 92.7% of images | Treat as background signal, not discriminative |
 | `cloudy` never co-occurs with surface labels | Physically motivated — clouds block the sensor |
 | No natural "up" orientation in satellite imagery | Flips + 90/180/270° rotations are valid augmentations |
-| `blow_down` ≈ `selective_logging` visually | Predicted hardest class before training |
+| `blow_down` ≈ `selective_logging` visually | Predicted hardest class before training — confirmed |
 
 ---
 
@@ -56,7 +58,7 @@ The project follows a five-phase pipeline, each documented in its own notebook:
 - Image format audit (CMYK discovery, resolution confirmation)
 - Label frequency distribution (log scale — 383× imbalance makes linear scale misleading)
 - Labels-per-image distribution (complexity profiling)
-- **Co-occurrence heatmap** (Jaccard index) revealing ecological structure: `cloudy` is mutually exclusive with all surface labels; `artisinal_mine` co-occurs with `water` at 0.88 (gold mining requires rivers); all threats co-occur with `primary` at 1.0
+- Co-occurrence heatmap (Jaccard index) revealing ecological structure: `cloudy` is mutually exclusive with all surface labels; `artisinal_mine` co-occurs with `water` at 0.88 (gold mining requires rivers); all threats co-occur with `primary` at 1.0
 - Visual grid of real images per label category — including direct comparison of pristine forest vs. human-disturbed zones
 
 ### 2. Dataset & Augmentation (`02_dataset.ipynb`)
@@ -66,37 +68,105 @@ The project follows a five-phase pipeline, each documented in its own notebook:
 - `DataLoader` configuration for GPU-optimized throughput
 
 ### 3. CNN Baseline (`03_cnn_baseline.ipynb`)
-- Custom CNN architecture trained from scratch
+- Custom CNN architecture trained from scratch (2.39M parameters, 15 epochs)
 - `BCEWithLogitsLoss` with `pos_weight` to handle class imbalance
-- **F2-score** as primary metric (recall weighted 2× over precision — false negatives are costlier)
-- Threshold optimization over validation set
+- F2-score as primary metric (recall weighted 2× over precision — false negatives are costlier)
+- Global decision threshold set at 0.3
 
 ### 4. Transfer Learning (`04_finetuning.ipynb`)
-- EfficientNet-B3 backbone with multi-label classification head
-- Fine-tuning strategy: frozen backbone → gradual unfreezing
-- Compared against baseline on identical test split
+- EfficientNet-B3 backbone with multi-label classification head (10.72M parameters)
+- Two-phase fine-tuning: frozen backbone (7 epochs) → gradual unfreezing of layers 5–8 with discriminative learning rates 1e-4/1e-5 (10 epochs)
+- Largest per-class improvement: `artisinal_mine` (+0.279 F2), driven by transfer of color/texture features from ImageNet
 
 ### 5. Interpretability (`05_gradcam.ipynb`)
-- **Grad-CAM** applied per label — the visual equivalent of SHAP for CNNs
-- Answers: *which pixels drove the model to predict `selective_logging`?*
-- High-confidence misclassification analysis (especially `blow_down` vs `selective_logging`)
+- Grad-CAM applied per label using hooks on `model_eff.features[-1]` (last convolutional block)
+- CAM energy analysis across 8 representative classes to characterize model attention patterns
+- Misclassification analysis for threat classes, including confusion matrix between `blow_down` and `selective_logging`
 
 ---
 
 ## 📈 Results
 
-*To be updated after training.*
+### Overall metrics
 
-| Model | F2-Score | Precision | Recall | ROC-AUC |
+| Model | F2-macro | F2-micro | Parameters |
+|---|---|---|---|
+| CNN Baseline | 0.4749 | 0.7364 | 2.39M |
+| EfficientNet-B3 Phase 1 (frozen backbone) | 0.4937 | — | 10.72M |
+| EfficientNet-B3 Fine-tuned | **0.5435** | **0.8130** | 10.72M |
+| Absolute improvement (baseline → fine-tuned) | +0.0686 | +0.0766 | |
+
+### Per-class F2 — EfficientNet-B3 fine-tuned
+
+| Class | F2 | TP | FP | FN |
 |---|---|---|---|---|
-| CNN Baseline | — | — | — | — |
-| EfficientNet-B3 (fine-tuned) | — | — | — | — |
+| `blow_down` | 0.045 | 13 | 1363 | 5 |
+| `slash_burn` | 0.081 | 27 | 1512 | 4 |
+| `selective_logging` | 0.119 | 55 | 2018 | 4 |
+| `blooming` | 0.123 | 61 | 2143 | 6 |
+| `conventional_mine` | 0.143 | 17 | 507 | 1 |
+| `bare_ground` | 0.301 | 180 | 2033 | 14 |
+| `artisinal_mine` | 0.412 | 70 | 500 | 0 |
+| `habitation` | 0.614 | 650 | 1871 | 43 |
+| `cultivation` | 0.642 | 832 | 2062 | 64 |
+| `haze` | 0.652 | 501 | 1263 | 18 |
+| `cloudy` | 0.780 | 410 | 547 | 8 |
+| `water` | 0.789 | 1395 | 1340 | 131 |
+| `road` | 0.841 | 1518 | 1052 | 96 |
+| `agriculture` | 0.882 | 2301 | 859 | 170 |
+| `partly_cloudy` | 0.911 | 1413 | 544 | 36 |
+| `primary` | 0.946 | 7004 | 50 | 492 |
+| `clear` | 0.958 | 5483 | 283 | 227 |
+
+The performance gap between atmospheric/common labels (F2 > 0.78) and rare threat labels (F2 < 0.15) reflects the core challenge of the problem: threat classes have few training examples, weak visual signal, and similar appearance to non-threat classes.
 
 ---
 
 ## 🔍 Key Insights (Grad-CAM)
 
-*To be updated after interpretability analysis.*
+### 1. Attention patterns depend on label semantics
+
+CAM energy (mean activation fraction across the image) varies systematically by label type:
+
+| Label | CAM energy (μ) | Pattern |
+|---|---|---|
+| `cloudy` | 0.55 | Fully diffuse — the model looks everywhere, which is correct: clouds cover the whole frame |
+| `artisinal_mine` | 0.29 | High energy, high variance (σ=0.09) — detects exposed reddish soil but inconsistently |
+| `blow_down` | 0.21 | Moderately diffuse with high variance — erratic signal |
+| `agriculture` | 0.19 | Moderate — activates on geometric field patterns |
+| `road` | 0.12 | Focused — linear structures are a clear localized signal |
+| `water` | 0.11 | Focused — spectral signature of water is localized and distinctive |
+| `primary` | 0.10 | Focused and consistent (σ low) — dense canopy texture is reliable |
+
+### 2. The blow_down problem is not class confusion — it is threshold sensitivity
+
+The initial hypothesis was that `blow_down` and `selective_logging` would be confused with each other due to visual similarity. The data tells a more precise story:
+
+- Direct confusion (GT=`blow_down`, predicted as `selective_logging`): **3 cases**
+- Direct confusion (GT=`selective_logging`, predicted as `blow_down`): **24 cases**
+- False positives of `blow_down` at threshold=0.3: **1363** against only 18 true positives in validation
+
+The model is not systematically confusing these two classes. It produces weak, noisy probability scores for `blow_down` across many unrelated images, and a global threshold of 0.3 activates them all. **Per-class threshold optimization would be the highest-ROI next step — no retraining required.**
+
+### 3. artisinal_mine — perfect recall, low precision
+
+`artisinal_mine` achieved Recall=1.0 (FN=0) with F2=0.412. The model learned a strong visual signal — exposed reddish-brown soil, characteristic of open-pit artisanal gold mining — that transfers well from ImageNet features. The 500 FPs occur because the same signal appears in agricultural clearings and unpaved roads. This explains why it was the largest per-class improvement over the baseline (+0.279 F2): the signal exists and is transferable, but it is not exclusive to mines.
+
+---
+
+## ⚠️ Limitations & Future Work
+
+**Per-class threshold optimization.** A global threshold of 0.3 creates massive FP rates for rare classes. Optimizing a separate threshold per class over the validation set is the highest-ROI next step — no retraining required.
+
+**Binary success metric is a ceiling, not a floor.** The F2-score optimization assumes equal cost across all threat labels — in practice, `slash_burn` and `artisinal_mine` may warrant higher penalties than `bare_ground`.
+
+**Dataset is a snapshot.** The Kaggle dataset covers a specific time window. Temporal dynamics (seasonality, trend detection) are not captured.
+
+**256×256 chips lose spatial context.** At this resolution, small artisanal mines may be indistinguishable from natural clearings without surrounding context.
+
+**blow_down is structurally hard.** With only 101 examples and strong visual similarity to disturbed vegetation in general, this class underperforms regardless of architecture. Few-shot learning or synthetic augmentation could help.
+
+**No multispectral bands.** The dataset provides only RGB. Real-world deforestation detection systems use near-infrared (NIR) and SWIR bands, which dramatically improve vegetation health assessment.
 
 ---
 
@@ -105,9 +175,10 @@ The project follows a five-phase pipeline, each documented in its own notebook:
 ### On Kaggle (recommended)
 
 1. Fork this notebook on Kaggle
-2. Add the dataset: [nikitarom/planets-dataset](https://www.kaggle.com/datasets/nikitarom/planets-dataset)
+2. Add the dataset: `nikitarom/planets-dataset`
 3. Enable GPU accelerator (Tesla T4 or better)
-4. Run notebooks in order: `01` → `02` → `03` → `04` → `05`
+4. Run notebooks in order: `01 → 02 → 03 → 04 → 05`
+5. Before running notebook 05: save notebook 04's output and add it as an input dataset to notebook 05 — the `.pth` checkpoint does not persist across sessions automatically
 
 ### Locally
 
@@ -129,7 +200,7 @@ unzip planets-dataset.zip -d data/raw/
 jupyter lab notebooks/
 ```
 
-> **Note:** dataset files are not tracked in this repo (see `.gitignore`). Download them separately as described above.
+> Note: dataset files are not tracked in this repo (see `.gitignore`). Download them separately as described above.
 
 ---
 
@@ -150,19 +221,9 @@ amazonnet/
 
 ---
 
-## ⚠️ Limitations & Future Work
-
-- **Binary success metric is a ceiling, not a floor.** The F2-score optimization assumes equal cost across all threat labels — in practice, `slash_burn` and `artisinal_mine` may warrant higher penalties than `bare_ground`.
-- **Dataset is a snapshot.** The Kaggle dataset covers a specific time window. Temporal dynamics (seasonality, trend detection) are not captured.
-- **256×256 chips lose spatial context.** At this resolution, small artisanal mines may be indistinguishable from natural clearings without surrounding context.
-- **`blow_down` is structurally hard.** With only 101 examples and strong visual similarity to `selective_logging`, this class is expected to underperform regardless of architecture. Few-shot learning or synthetic augmentation could help.
-- **No multispectral bands.** The dataset provides only RGB. Real-world deforestation detection systems use near-infrared (NIR) and SWIR bands, which dramatically improve vegetation health assessment.
-
----
-
 ## 🔗 Related Projects
 
-- [**CineAI**](https://github.com/pedrosall/cineai) — Movie commercial success classifier using pre-production tabular data. Logistic Regression, Random Forest, and MLP with SHAP interpretability.
+**CineAI** — Movie commercial success classifier using pre-production tabular data. Logistic Regression, Random Forest, and MLP with SHAP interpretability.
 
 ---
 
