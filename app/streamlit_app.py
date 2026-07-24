@@ -40,7 +40,7 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    st.image(uploaded_file, caption="Imagen subida", use_column_width=True)
+    st.image(uploaded_file, caption="Imagen subida", width="stretch")
 
     if st.button("Analizar imagen", type="primary"):
         with st.spinner("Analizando... (puede tardar unos segundos en CPU)"):
@@ -67,7 +67,7 @@ if uploaded_file is not None:
         # ------------------------------------------------------------------
         st.subheader("Mapa de atención (Grad-CAM)")
         gradcam_bytes = base64.b64decode(result["gradcam_b64"])
-        st.image(gradcam_bytes, caption=f"Regiones relevantes para '{result['top_label']}'", use_column_width=True)
+        st.image(gradcam_bytes, caption=f"Regiones relevantes para '{result['top_label']}'", width="stretch")
 
         # ------------------------------------------------------------------
         # Probabilidades por etiqueta
