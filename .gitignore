@@ -1,0 +1,13 @@
+# Entornos virtuales
+venv/
+frontend_venv/
+
+# Cachés de Python
+__pycache__/
+*.pyc
+
+# Secretos de Streamlit (nunca deben subirse a GitHub)
+.streamlit/secrets.toml
+
+# Sistema
+.DS_Store
