@@ -2,7 +2,19 @@
 
 Can a deep learning model learn to detect illegal logging, slash-and-burn agriculture, and artisanal mining directly from satellite imagery — before any human analyst flags them?
 
-This project builds a full computer vision pipeline — from exploratory data analysis to Grad-CAM visual explanations — to classify land use and atmospheric conditions in chips of Amazon rainforest imagery. It is a real-world multi-label classification problem where a single image can carry up to 9 simultaneous labels, and where missing a threat (false negative) is far more costly than a false alarm.
+This project builds a full computer vision pipeline — from exploratory data analysis to a deployed, production-optimized inference API with Grad-CAM visual explanations — to classify land use and atmospheric conditions in chips of Amazon rainforest imagery. It is a real-world multi-label classification problem where a single image can carry up to 9 simultaneous labels, and where missing a threat (false negative) is far more costly than a false alarm.
+
+---
+
+## 🚀 Live Demo
+
+| | |
+|---|---|
+| **Frontend (Streamlit)** | [amazonnet.streamlit.app](https://pedrosall-amazonnet.streamlit.app) |
+| **Backend API (FastAPI)** | [amazon-deforestation-cv.onrender.com](https://amazon-deforestation-cv.onrender.com) |
+| **API docs (Swagger)** | [/docs](https://amazon-deforestation-cv.onrender.com/docs) |
+
+> ⚠️ **Cold start notice:** the backend runs on a free-tier instance that sleeps after 15 minutes of inactivity. The first prediction after a period of inactivity can take up to 1–2 minutes while the instance wakes up and reloads the model. This is a conscious trade-off for a zero-cost portfolio deployment, not a bug — see [Deployment Architecture](#-deployment-architecture) below for why.
 
 ---
 
@@ -154,8 +166,60 @@ The model is not systematically confusing these two classes. It produces weak, n
 
 ---
 
+## 🏗️ Deployment Architecture
+
+```
+┌─────────────────────┐      HTTPS POST /predict      ┌──────────────────────┐
+│   Streamlit Cloud    │ ─────────────────────────────▶│   Render (Docker)    │
+│   (frontend, free)   │ ◀───────────────────────────── │   FastAPI backend    │
+└─────────────────────┘         JSON response          └───────────┬──────────┘
+                                                                     │
+                                                          hf_hub_download()
+                                                          on startup
+                                                                     ▼
+                                                         ┌──────────────────────┐
+                                                         │  HuggingFace Hub      │
+                                                         │  (model weights,      │
+                                                         │  ~40MB .pth file)     │
+                                                         └──────────────────────┘
+```
+
+**Why this split, and not a single service?** The model (EfficientNet-B3, PyTorch) needs a real Python runtime with `torch` installed — that rules out static hosting. The frontend (Streamlit) and the inference backend (FastAPI) have very different resource profiles, so they're deployed independently:
+
+- **Frontend → Streamlit Community Cloud.** Free, permanent, no credit card. Deploys directly from the `app/` subfolder of this repo.
+- **Backend → Render (Docker, free tier).** Free, permanent, no credit card, 512MB RAM. Deploys directly from `backend/Dockerfile`.
+- **Model weights → HuggingFace Hub.** Kept out of the Docker image entirely — the backend downloads the `.pth` checkpoint at startup via `hf_hub_download()`, so the image stays lightweight and the model can be updated without rebuilding the container.
+
+**Platforms evaluated and rejected**, and why — because "it changed since last week" is a real constraint in this space:
+- ~~HuggingFace Spaces (Docker)~~ — used to offer a free CPU tier; as of mid-2026, Docker Spaces require a paid plan for new accounts.
+- ~~Koyeb~~ — free tier existed at the start of this project; discontinued for new signups following Koyeb's acquisition by Mistral AI.
+- ~~Railway~~ / ~~Fly.io~~ — no longer offer a genuine permanent free tier.
+- ~~Google Cloud Run~~ / ~~Oracle Cloud~~ — generous free tiers, but require a credit card for identity verification, which was a hard constraint for this deployment.
+
+---
+
+## ⚙️ Production Optimization: Fitting a CNN into 512MB
+
+Render's free tier caps memory at 512MB. A straightforward PyTorch deployment of EfficientNet-B3 with Grad-CAM support peaked at **644MB** — over budget. Getting it to fit (with real headroom, verified in production, not just locally) required iterating through several optimization strategies:
+
+| Technique | Peak memory | Result |
+|---|---|---|
+| Baseline (float32, full PyTorch) | 644.3 MiB | ❌ Over budget |
+| `torch.set_num_threads(1)` | 630.6 MiB | Marginal (~2%) — affects parallelism, not memory footprint |
+| Dynamic quantization (`nn.Linear` only) | 599.7 MiB | Insufficient (~7%) — EfficientNet-B3 is >95% convolutional, and conv layers can't be quantized without breaking `autograd` |
+| **`float16` (model + input tensors)** | **433.3 MiB (local)** | ✅ Halves memory while staying differentiable |
+| + Remove OpenCV, replace with PIL/NumPy | *(further reduction)* | Cuts import overhead from a heavy native dependency |
+| + Explicit `gc.collect()` between forward passes | *(further reduction)* | Frees memory between the two forward passes (probabilities + Grad-CAM) |
+
+**Why not ONNX or full `int8` quantization?** Both were seriously considered and rejected for the same structural reason: **Grad-CAM requires a live autograd graph** (`.backward()` on the top predicted class). ONNX Runtime and quantized convolutional layers are inference-only — using either would have broken the interpretability feature that is core to this project's value. `float16` was the sweet spot: still a normal floating-point format, so gradients flow through it exactly as they do in `float32`, at half the memory cost.
+
+**A local-vs-production gap that mattered:** the first deploy attempt, measured at 433MB locally via `docker stats`, still crashed on Render with `Ran out of memory (used over 512MB)`. Local Docker Desktop and Render's underlying `cgroups`-based limits don't account for memory identically — the only way to validate a fix was to reproduce the exact 512MB cap locally (`docker-compose.yml` → `deploy.resources.limits.memory: 512M`) and confirm against the real Render deployment, not trust local numbers alone.
+
+---
+
 ## ⚠️ Limitations & Future Work
 
+### Modeling
 **Per-class threshold optimization.** A global threshold of 0.3 creates massive FP rates for rare classes. Optimizing a separate threshold per class over the validation set is the highest-ROI next step — no retraining required.
 
 **Binary success metric is a ceiling, not a floor.** The F2-score optimization assumes equal cost across all threat labels — in practice, `slash_burn` and `artisinal_mine` may warrant higher penalties than `bare_ground`.
@@ -168,11 +232,22 @@ The model is not systematically confusing these two classes. It produces weak, n
 
 **No multispectral bands.** The dataset provides only RGB. Real-world deforestation detection systems use near-infrared (NIR) and SWIR bands, which dramatically improve vegetation health assessment.
 
+### Deployment
+**Cold starts on the free tier.** Render's free instances sleep after 15 minutes of inactivity; waking up (container start + model download + PyTorch init) can take 1–2 minutes. A paid always-on tier would eliminate this, at a small monthly cost.
+
+**512MB is a tight ceiling.** The current setup has limited headroom for a larger backbone (e.g. EfficientNet-B5+) without further optimization or a paid tier with more RAM.
+
+**Single-request inference.** The backend processes one image at a time with `WEB_CONCURRENCY=1` — appropriate for a portfolio demo, not for production-scale concurrent traffic.
+
 ---
 
 ## 🛠️ How to Run
 
-### On Kaggle (recommended)
+### Try the live demo (easiest)
+
+Just visit the [Streamlit app](https://pedrosall-amazonnet.streamlit.app) — no setup required. First prediction may be slow due to backend cold start (see [Live Demo](#-live-demo) notice above).
+
+### Run the notebooks (model training) — on Kaggle (recommended)
 
 1. Fork this notebook on Kaggle
 2. Add the dataset: `nikitarom/planets-dataset`
@@ -180,27 +255,43 @@ The model is not systematically confusing these two classes. It produces weak, n
 4. Run notebooks in order: `01 → 02 → 03 → 04 → 05`
 5. Before running notebook 05: save notebook 04's output and add it as an input dataset to notebook 05 — the `.pth` checkpoint does not persist across sessions automatically
 
-### Locally
+### Run the full app locally (backend + frontend)
 
 ```bash
 # Clone the repo
 git clone https://github.com/pedrosall/amazonnet.git
 cd amazonnet
 
-# Set up environment
-python -m venv venv
+# Backend
+cd backend
+python3 -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-
-# Download dataset from Kaggle
-kaggle datasets download nikitarom/planets-dataset
-unzip planets-dataset.zip -d data/raw/
-
-# Run notebooks in order
-jupyter lab notebooks/
+uvicorn main:app --reload --port 8000
 ```
 
-> Note: dataset files are not tracked in this repo (see `.gitignore`). Download them separately as described above.
+In a second terminal:
+
+```bash
+# Frontend
+cd app
+python3 -m venv frontend_venv
+source frontend_venv/bin/activate
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+The frontend defaults to `http://127.0.0.1:8000` for the backend URL when no `API_URL` secret is set — no extra configuration needed for local development.
+
+### Run the backend via Docker
+
+```bash
+docker compose up --build
+```
+
+Serves the API at `http://localhost:8000` (mapped from the container's internal port 7860, matching the Render/HuggingFace Docker Space convention).
+
+> Note: model training requires the dataset, which is not tracked in this repo (see `.gitignore`). Download it from Kaggle separately as described above.
 
 ---
 
@@ -211,12 +302,21 @@ amazonnet/
 ├── README.md
 ├── requirements.txt
 ├── .gitignore
-└── notebooks/
-    ├── 01_eda.ipynb              # EDA: image audit, label distribution, co-occurrence
-    ├── 02_dataset.ipynb          # PyTorch Dataset, DataLoader, augmentation
-    ├── 03_cnn_baseline.ipynb     # Custom CNN from scratch
-    ├── 04_finetuning.ipynb       # EfficientNet-B3 transfer learning
-    └── 05_gradcam.ipynb          # Grad-CAM visual interpretability
+├── docker-compose.yml         # Local Docker orchestration for the backend
+├── notebooks/
+│   ├── 01_eda.ipynb           # EDA: image audit, label distribution, co-occurrence
+│   ├── 02_dataset.ipynb       # PyTorch Dataset, DataLoader, augmentation
+│   ├── 03_cnn_baseline.ipynb  # Custom CNN from scratch
+│   ├── 04_finetuning.ipynb    # EfficientNet-B3 transfer learning
+│   └── 05_gradcam.ipynb       # Grad-CAM visual interpretability
+├── backend/                   # FastAPI inference API (deployed on Render)
+│   ├── main.py                 # API routes: /health, /predict
+│   ├── model.py                 # Model loading, preprocessing, Grad-CAM, memory optimizations
+│   ├── requirements.txt
+│   └── Dockerfile
+└── app/                       # Streamlit frontend (deployed on Streamlit Cloud)
+    ├── streamlit_app.py
+    └── requirements.txt
 ```
 
 ---
@@ -229,5 +329,5 @@ amazonnet/
 
 ## 📜 License
 
-This project is for educational and portfolio purposes.  
+This project is for educational and portfolio purposes.
 Dataset © Planet Labs / Kaggle competition, distributed under their respective terms.
