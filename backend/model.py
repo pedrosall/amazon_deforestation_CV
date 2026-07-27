@@ -6,8 +6,8 @@ import base64
 import io
 import os
 
-import cv2
 import numpy as np
+import gc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +15,8 @@ from huggingface_hub import hf_hub_download
 from PIL import Image
 from torchvision import transforms
 from torchvision.models import efficientnet_b3
+
+torch.set_num_threads(1)
 
 # --------------------------------------------------------------------------
 # Configuración
@@ -93,6 +95,7 @@ def load_model() -> nn.Module:
     state_dict = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(state_dict)
     model.eval()
+    model = model.half()
 
     # Registrar hooks de Grad-CAM sobre la última capa conv del feature extractor
     target_layer = model.features[-1]
@@ -120,6 +123,16 @@ def preprocess_image(image_bytes: bytes) -> tuple[torch.Tensor, Image.Image]:
     resized_for_overlay = image.resize((IMAGE_SIZE, IMAGE_SIZE))
     return tensor, resized_for_overlay
 
+def _apply_jet_colormap(gray: np.ndarray) -> np.ndarray:
+    """
+    Aplica un colormap tipo 'jet' (azul -> rojo) sin depender de OpenCV.
+    Entrada: array float en [0, 1]. Salida: array uint8 RGB (H, W, 3).
+    """
+    r = np.clip(np.minimum(4 * gray - 1.5, -4 * gray + 4.5), 0, 1)
+    g = np.clip(np.minimum(4 * gray - 0.5, -4 * gray + 3.5), 0, 1)
+    b = np.clip(np.minimum(4 * gray + 0.5, -4 * gray + 2.5), 0, 1)
+    rgb = np.stack([r, g, b], axis=-1)
+    return (rgb * 255).astype(np.uint8)
 
 # --------------------------------------------------------------------------
 # Grad-CAM
@@ -150,16 +163,15 @@ def compute_gradcam(model: nn.Module, input_tensor: torch.Tensor, class_idx: int
     cam = cam / (cam.max() + 1e-8)
     cam = cam.numpy()
 
-    cam_resized = cv2.resize(cam, (IMAGE_SIZE, IMAGE_SIZE))
+    cam_image = Image.fromarray(cam.astype(np.float32), mode="F")
+    cam_resized = np.array(cam_image.resize((IMAGE_SIZE, IMAGE_SIZE), Image.BILINEAR))
     return cam_resized
 
 
 def overlay_gradcam(base_image: Image.Image, cam: np.ndarray, alpha: float = 0.45) -> str:
     """Superpone el heatmap Grad-CAM sobre la imagen base y devuelve un PNG en base64."""
     base_rgb = np.array(base_image)  # RGB
-    heatmap = np.uint8(255 * cam)
-    heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)  # BGR
-    heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+    heatmap_color = _apply_jet_colormap(cam)  # ya viene en RGB, no BGR
 
     overlay = np.uint8(base_rgb * (1 - alpha) + heatmap_color * alpha)
 
@@ -176,11 +188,14 @@ def overlay_gradcam(base_image: Image.Image, cam: np.ndarray, alpha: float = 0.4
 def predict(image_bytes: bytes) -> dict:
     model = get_model()
     input_tensor, base_image = preprocess_image(image_bytes)
+    input_tensor = input_tensor.half()
 
     # Forward sin gradientes para las probabilidades
     with torch.no_grad():
         logits = model(input_tensor)
         probs_tensor = torch.sigmoid(logits)[0]
+        del logits
+        gc.collect()
 
     probs = {label: float(probs_tensor[i]) for i, label in enumerate(ALL_LABELS)}
     active_labels = [label for label, p in probs.items() if p >= THRESHOLD]
@@ -191,6 +206,7 @@ def predict(image_bytes: bytes) -> dict:
     # Forward + backward con gradientes solo para la clase top (Grad-CAM)
     cam = compute_gradcam(model, input_tensor, top_idx)
     gradcam_b64 = overlay_gradcam(base_image, cam)
+    gc.collect()
 
     return {
         "probs": probs,
